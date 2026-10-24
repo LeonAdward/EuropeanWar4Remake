@@ -8,6 +8,7 @@ on:
       - '.github/workflows/ew4_mobile_build.yml'
       - 'ew4_project.zip.part*'
       - 'ew4_core_optimizations.zip'
+      - 'ew4_strategic_path_patch.zip'
   workflow_dispatch:
     inputs:
       build_android:
@@ -94,6 +95,19 @@ jobs:
           else
             echo 'No optional C# core patch uploaded; compiling existing source.'
           fi
+      - name: Apply strategic path reuse (original full-map range)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f ew4_strategic_path_patch.zip ]; then
+            unzip -o -q ew4_strategic_path_patch.zip -d .
+            test -f rewrite/Ew4.Core/HexMap.cs
+            test -f rewrite/Ew4.Core/WorldAiStrategy.cs
+            test -f rewrite/Ew4.Verify/StrategicDistanceChecks.cs
+            echo 'Planning-scoped strategic route cache applied; no radius restriction.'
+          else
+            echo 'Optional strategic patch not uploaded. Retaining current routing logic.'
+          fi
       - name: Install .NET 10 SDK
         uses: actions/setup-dotnet@v4
         with:
@@ -117,6 +131,12 @@ jobs:
         run: |
           set -o pipefail
           dotnet run --project rewrite/Ew4.Verify/Ew4.Verify.csproj -c Release -- . --client-only 2>&1 | tee logs/client-verify.log
+      - name: Verify strategic distances match original unrestricted search
+        if: ${{ hashFiles('ew4_strategic_path_patch.zip') != '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          dotnet run --project rewrite/Ew4.Verify/Ew4.Verify.csproj -c Release -- . --strategic-cache-only 2>&1 | tee logs/strategic-cache-verify.log
       - name: Publish Web host
         shell: bash
         run: |
