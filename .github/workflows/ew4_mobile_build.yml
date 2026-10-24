@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/ew4_mobile_build.yml'
       - 'ew4_project.zip.part*'
+      - 'ew4_core_optimizations.zip'
   workflow_dispatch:
     inputs:
       build_android:
@@ -82,6 +83,17 @@ jobs:
                   sys.exit('Missing source file after extraction: ' + name)
           print('Archive verified and source files extracted successfully.')
           PY
+      - name: Apply latest C# move/attack/AI optimization patch
+        shell: bash
+        run: |
+          if [ -f ew4_core_optimizations.zip ]; then
+            unzip -o -q ew4_core_optimizations.zip -d .
+            test -f rewrite/Ew4.Client/ClientAiBatch.cs
+            test -f rewrite/Ew4.Core/WorldActions.cs
+            echo 'Optimized C# source applied.'
+          else
+            echo 'No optional C# core patch uploaded; compiling existing source.'
+          fi
       - name: Install .NET 10 SDK
         uses: actions/setup-dotnet@v4
         with:
@@ -100,6 +112,11 @@ jobs:
         run: |
           set -o pipefail
           dotnet build rewrite/Ew4.Verify/Ew4.Verify.csproj -c Release -v:minimal 2>&1 | tee logs/verify-build.log
+      - name: Verify saved-game persistence and client APIs
+        shell: bash
+        run: |
+          set -o pipefail
+          dotnet run --project rewrite/Ew4.Verify/Ew4.Verify.csproj -c Release -- . --client-only 2>&1 | tee logs/client-verify.log
       - name: Publish Web host
         shell: bash
         run: |
