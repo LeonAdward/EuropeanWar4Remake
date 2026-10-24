@@ -1,10 +1,16 @@
-name: EW4 AI Online Build
+name: EW4 AI Online Build (Auto Run)
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/ew4_mobile_build.yml'
+      - 'ew4_project.zip.part*'
   workflow_dispatch:
     inputs:
       build_android:
-        description: "Build Android debug APK after web checks"
+        description: 'Build Android debug APK after successful C# and Web builds'
         type: boolean
         default: true
         required: true
@@ -15,108 +21,143 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
-      - name: Reassemble and verify uploaded project
+      - name: Check out uploaded files
+        uses: actions/checkout@v4
+      - name: Reassemble and verify source archive
         shell: bash
         run: |
-          python3 - <<'PYBUILD'
+          mkdir -p logs
+          python3 - <<'PY' 2>&1 | tee logs/source-restore.log
           from pathlib import Path
           from hashlib import sha256
           from zipfile import ZipFile
-
-          expected_parts = 6
-          expected_sha = 'a1f58164bb9acf51136a056b57e4050bdca9ad3a0428f68845b1500d664ef751'
-          parts = []
-          for i in range(1, expected_parts + 1):
-              filename = f'ew4_project.zip.part{i:02d}'
-              whole = Path(filename)
-              if whole.is_file():
-                  parts.append(whole)
-                  continue
-              subparts = sorted(Path('.').glob(filename + '.small*'))
-              if not subparts:
-                  raise RuntimeError('Missing ' + filename + ' (or its .smallXX subparts)')
-              for j, piece in enumerate(subparts, 1):
-                  if piece.name != filename + f'.small{j:02d}':
-                      raise RuntimeError('Missing/reordered small piece for ' + filename)
-              with whole.open('wb') as merged:
-                  for piece in subparts:
-                      print('Rebuilding', filename, 'using', piece.name)
-                      with piece.open('rb') as stream:
-                          while data := stream.read(1024 * 1024):
-                              merged.write(data)
-              parts.append(whole)
+          import sys
+          expected = 'a1f58164bb9acf51136a056b57e4050bdca9ad3a0428f68845b1500d664ef751'
+          print('Files in repository root:')
+          for f in sorted(Path('.').glob('ew4_project.zip.part*')):
+              print('  ', f.name, f.stat().st_size, 'bytes')
+          pieces = []
+          for n in range(1, 7):
+              stem = f'ew4_project.zip.part{n:02}'
+              whole = Path(stem)
+              small = sorted(Path('.').glob(stem + '.small*'))
+              if small:
+                  for j, p in enumerate(small, 1):
+                      expected_name = stem + f'.small{j:02}'
+                      if p.name != expected_name:
+                          sys.exit('Missing or misnamed small part: ' + expected_name)
+                  if n in (4, 5) and len(small) != 4:
+                      sys.exit(f'Expected 4 small parts for part {n}, found {len(small)}')
+                  print('Using', len(small), 'small pieces for part', n)
+                  pieces.extend(small)
+              elif whole.exists():
+                  print('Using whole part', n)
+                  pieces.append(whole)
+              else:
+                  sys.exit(f'Missing {stem}. Upload it (or all of its .small01-.small04 pieces) to repository root.')
           digest = sha256()
-          with open('ew4_project.zip', 'wb') as target:
-              for part in parts:
-                  print('Adding', part.name, part.stat().st_size)
-                  with part.open('rb') as source:
-                      while data := source.read(1024 * 1024):
-                          target.write(data)
-                          digest.update(data)
-          if digest.hexdigest() != expected_sha:
-              raise RuntimeError('ZIP checksum mismatch; please reupload the parts')
-          with ZipFile('ew4_project.zip') as archive:
-              bad = archive.testzip()
-              if bad: raise RuntimeError('Corrupted ZIP member: ' + bad)
-              archive.extractall('.')
-          required = [
-              'rewrite/Ew4.Client/ClientAiBatch.cs',
-              'rewrite/Ew4.Client/Ew4.Client.csproj',
-              'rewrite/Ew4.Web/Ew4.Web.csproj',
-              'rewrite/Ew4.Android/Ew4.Android.csproj',
-          ]
+          with Path('ew4_project.zip').open('wb') as out:
+              for file in pieces:
+                  with file.open('rb') as inp:
+                      while chunk := inp.read(1024 * 1024):
+                          out.write(chunk)
+                          digest.update(chunk)
+          print('Archive SHA256:', digest.hexdigest())
+          if digest.hexdigest() != expected:
+              sys.exit('Project SHA256 mismatch: at least one part was corrupted, renamed, or belongs to another version.')
+          with ZipFile('ew4_project.zip') as z:
+              bad = z.testzip()
+              if bad:
+                  sys.exit('Corrupt archive entry: ' + bad)
+              z.extractall('.')
+          required = ['rewrite/Ew4.Client/ClientAiBatch.cs',
+                      'rewrite/Ew4.Client/Ew4.Client.csproj',
+                      'rewrite/Ew4.Verify/Ew4.Verify.csproj',
+                      'rewrite/Ew4.Web/Ew4.Web.csproj',
+                      'rewrite/Ew4.Android/Ew4.Android.csproj']
           for name in required:
-              if not Path(name).is_file(): raise RuntimeError('Missing project file: ' + name)
-          print('Source restored. SHA-256 verified.')
-          PYBUILD
-      - name: Set up .NET 10 SDK
+              if not Path(name).is_file():
+                  sys.exit('Missing source file after extraction: ' + name)
+          print('Archive verified and source files extracted successfully.')
+          PY
+      - name: Install .NET 10 SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
-      - name: Compile Ew4.Client (Release)
-        run: dotnet build rewrite/Ew4.Client/Ew4.Client.csproj -c Release
-      - name: Build Ew4.Verify (Release)
-        run: dotnet build rewrite/Ew4.Verify/Ew4.Verify.csproj -c Release
-      - name: Publish Web application
-        run: dotnet publish rewrite/Ew4.Web/Ew4.Web.csproj -c Release -o "$GITHUB_WORKSPACE/dist/web"
-      - name: Upload Web build
+          dotnet-version: '10.0.x'
+      - name: Show installed SDKs
+        shell: bash
+        run: |
+          dotnet --info 2>&1 | tee logs/dotnet-info.log
+      - name: Compile Ew4.Client
+        shell: bash
+        run: |
+          set -o pipefail
+          dotnet build rewrite/Ew4.Client/Ew4.Client.csproj -c Release -v:minimal 2>&1 | tee logs/client-build.log
+      - name: Compile Ew4.Verify
+        shell: bash
+        run: |
+          set -o pipefail
+          dotnet build rewrite/Ew4.Verify/Ew4.Verify.csproj -c Release -v:minimal 2>&1 | tee logs/verify-build.log
+      - name: Publish Web host
+        shell: bash
+        run: |
+          set -o pipefail
+          dotnet publish rewrite/Ew4.Web/Ew4.Web.csproj -c Release -v:minimal -o "$GITHUB_WORKSPACE/dist/web" 2>&1 | tee logs/web-publish.log
+      - name: Upload Web host
         uses: actions/upload-artifact@v4
         with:
           name: ew4-web-publish
           path: dist/web/
           if-no-files-found: error
           retention-days: 7
-      - name: Set up Java 17
-        if: ${{ inputs.build_android }}
+      - name: Install Java 17
+        if: ${{ github.event_name == 'push' || inputs.build_android }}
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - name: Set up Android SDK
-        if: ${{ inputs.build_android }}
+      - name: Prepare Android SDK
+        if: ${{ github.event_name == 'push' || inputs.build_android }}
         uses: android-actions/setup-android@v3
-      - name: Install Android SDK and .NET Android workload
-        if: ${{ inputs.build_android }}
+      - name: Install Android platform
+        if: ${{ github.event_name == 'push' || inputs.build_android }}
+        shell: bash
         run: |
-          sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
-          dotnet workload install android
-      - name: Build Android ARM64 debug APK
-        if: ${{ inputs.build_android }}
+          set -o pipefail
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 2>&1 | tee logs/android-sdk.log
+      - name: Install .NET Android workload
+        if: ${{ github.event_name == 'push' || inputs.build_android }}
+        shell: bash
         run: |
+          set -o pipefail
+          dotnet workload install android 2>&1 | tee logs/android-workload.log
+      - name: Publish ARM64 Android debug APK
+        if: ${{ github.event_name == 'push' || inputs.build_android }}
+        shell: bash
+        run: |
+          set -o pipefail
           dotnet publish rewrite/Ew4.Android/Ew4.Android.csproj \
             -c Debug -f net10.0-android -r android-arm64 \
-            -p:AndroidPackageFormats=apk -p:AndroidUseSharedRuntime=false
+            -p:AndroidPackageFormats=apk -p:AndroidUseSharedRuntime=false \
+            -v:minimal 2>&1 | tee logs/android-build.log
           mkdir -p dist/android
           find rewrite/Ew4.Android/bin/Debug/net10.0-android -type f -name '*.apk' -exec cp '{}' dist/android/ \;
           test -n "$(find dist/android -name '*.apk' -print -quit)"
       - name: Upload Android APK
-        if: ${{ inputs.build_android }}
+        if: ${{ github.event_name == 'push' || inputs.build_android }}
         uses: actions/upload-artifact@v4
         with:
           name: ew4-android-debug-apk
           path: dist/android/*.apk
           if-no-files-found: error
           retention-days: 7
+      - name: Upload diagnostic logs even if build fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ew4-build-diagnostics
+          path: logs/
+          if-no-files-found: warn
+          retention-days: 14
