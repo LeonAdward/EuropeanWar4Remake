@@ -120,7 +120,7 @@ jobs:
           java-version: '17'
       - name: Prepare Android SDK
         if: ${{ github.event_name == 'push' || inputs.build_android }}
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
       - name: Install Android platform
         if: ${{ github.event_name == 'push' || inputs.build_android }}
         shell: bash
